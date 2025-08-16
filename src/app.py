@@ -6,17 +6,21 @@ from flask import Flask, request, jsonify, url_for, send_from_directory
 from flask_migrate import Migrate
 from flask_swagger import swagger
 from api.utils import APIException, generate_sitemap
-from api.models import db
+from api.models import db, User
 from api.routes import api
 from api.admin import setup_admin
 from api.commands import setup_commands
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask_cors import CORS
 
-# from models import Person
+app = Flask(__name__)
+CORS(app)  
 
 ENV = "development" if os.getenv("FLASK_DEBUG") == "1" else "production"
 static_file_dir = os.path.join(os.path.dirname(
     os.path.realpath(__file__)), '../dist/')
-app = Flask(__name__)
+
 app.url_map.strict_slashes = False
 
 # database condiguration
@@ -30,6 +34,7 @@ else:
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 MIGRATE = Migrate(app, db, compare_type=True)
 db.init_app(app)
+jwt = JWTManager(app)
 
 # add the admin
 setup_admin(app)
@@ -57,13 +62,59 @@ def sitemap():
     return send_from_directory(static_file_dir, 'index.html')
 
 # any other endpoint will try to serve it like a static file
-@app.route('/<path:path>', methods=['GET'])
-def serve_any_other_file(path):
-    if not os.path.isfile(os.path.join(static_file_dir, path)):
-        path = 'index.html'
-    response = send_from_directory(static_file_dir, path)
-    response.cache_control.max_age = 0  # avoid cache memory
-    return response
+
+
+@app.route('/register', methods=['POST'])
+def register():
+    body = request.get_json(silent=True)
+    if body is None:
+        return jsonify({'msg': 'Debes enviar información en el body'}), 400
+    if not body.get('user_name', '').strip():
+        return jsonify({'msg': 'Debes enviar un nombre válido'}), 400
+    if not body.get('email', '').strip():
+        return jsonify({'msg': 'Debes enviar un email válido'}), 400
+    if not body.get('password', '').strip():
+        return jsonify({'msg': 'Debes enviar un password válido'}), 400
+
+    hashed_password = generate_password_hash(body['password'])
+
+    new_user = User(
+        user_name=body['user_name'],
+        email=body['email'],
+        password=hashed_password,
+        is_active=True
+    )
+    db.session.add(new_user)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({'msg': 'Ingresa un email distinto.'}), 400
+
+    return jsonify({'msg': 'ok', 'new_user': new_user.serialize()}), 201
+
+
+@app.route('/login', methods=['POST'])
+def login():
+    body = request.get_json()
+    if not body or 'email' not in body or 'password' not in body:
+        return jsonify({'msg': 'Email y contraseña requeridos'}), 400
+
+    user = User.query.filter_by(email=body['email']).first()
+    if not user or not check_password_hash(user.password, body['password']):
+        return jsonify({'msg': 'Credenciales inválidas'}), 401
+
+    token = create_access_token(identity=str(user.id))
+    return jsonify({
+        "access_token": token,
+        "user": user.serialize()
+    }), 200
+
+
+@app.route('/jwtcheck', methods=['GET'])
+@jwt_required()
+def verification_token():
+    return jsonify({'msg': 'Token is valid'}), 200
 
 
 # this only runs if `$ python src/main.py` is executed
